@@ -1,0 +1,132 @@
+#!/usr/bin/env bash
+
+# source configuration values
+source .env
+
+# pull required docker images
+docker pull postgres
+docker pull oryd/hydra
+docker pull oryd/hydra-login-consent-node
+
+# create network, if not exists
+docker network ls|grep $HYDRA_NETWORK > /dev/null || docker network create $HYDRA_NETWORK
+
+# start the database container
+docker run \
+  --network $HYDRA_NETWORK \
+  --name $HYDRA_DBSERVER \
+  -e POSTGRES_USER=$HYDRA_USERNAME \
+  -e POSTGRES_PASSWORD=$HYDRA_PASSWORD \
+  -e POSTGRES_DB=$HYDRA_DATABASE \
+  -d postgres:latest
+sleep 5
+export DSN=postgres://$HYDRA_USERNAME:$HYDRA_PASSWORD@$HYDRA_DBSERVER:5432/$HYDRA_DATABASE?sslmode=disable
+
+# docker run -it --rm --entrypoint hydra oryd/hydra:latest help
+
+# run database migrations
+docker run -it --rm \
+  --network $HYDRA_NETWORK \
+  oryd/hydra:latest \
+  migrate sql --yes $DSN
+
+# create secret for hydra
+echo $(export LC_CTYPE=C; cat /dev/urandom | tr -dc 'a-zA-Z0-9' | fold -w 32 | head -n 1) > .secret
+export SECRETS_SYSTEM=$(cat .secret)
+
+# start hydra
+docker run -d \
+  --name $HYDRA_INSTANCE \
+  --network $HYDRA_NETWORK \
+  -p $HYDRA_ISSUER_PORT:4444 \
+  -p $HYDRA_ADMIN_PORT:4445 \
+  -e SECRETS_SYSTEM=$SECRETS_SYSTEM \
+  -e DSN=$DSN \
+  -e URLS_SELF_ISSUER=https://localhost:$HYDRA_ISSUER_PORT/ \
+  -e URLS_CONSENT=http://localhost:$HYDRA_AUTH_PORT/consent \
+  -e URLS_LOGIN=http://localhost:$HYDRA_AUTH_PORT/login \
+  -e URLS_LOGOUT=http://localhost:$HYDRA_AUTH_PORT/logout \
+  oryd/hydra:latest serve all
+
+# check the logs, to ensure hydra is running
+docker logs $HYDRA_INSTANCE
+sleep 5
+
+# delete client
+docker run --rm -it \
+  --network $HYDRA_NETWORK \
+  -e HYDRA_ADMIN_URL=https://$HYDRA_INSTANCE:4445 \
+  oryd/hydra:latest \
+  clients delete \
+  $HYDRA_CLIENT_ID \
+  --skip-tls-verify
+
+# create a client
+docker run --rm -it \
+  --network $HYDRA_NETWORK \
+  -e HYDRA_ADMIN_URL=https://$HYDRA_INSTANCE:4445 \
+  oryd/hydra:latest \
+  clients create \
+  --skip-tls-verify \
+  --id $HYDRA_CLIENT_ID \
+  --secret $HYDRA_CLIENT_SECRET \
+  --token-endpoint-auth-method client_secret_post \
+  --grant-types authorization_code,refresh_token,client_credentials,implicit \
+  --response-types token,code,id_token \
+  --scope openid,offline \
+  --callbacks http://127.0.0.1:9010/callback
+
+# list clients
+docker run -it --rm \
+  --network $HYDRA_NETWORK \
+  oryd/hydra:latest \
+  clients \
+  --skip-tls-verify \
+  --endpoint https://$HYDRA_INSTANCE:4445 \
+  list
+
+# run a consent app
+docker run -d \
+  --network $HYDRA_NETWORK \
+  --name $HYDRA_CONSENT \
+  -p 9020:3000 \
+  -e HYDRA_ADMIN_URL=https://$HYDRA_INSTANCE:4445 \
+  -e NODE_TLS_REJECT_UNAUTHORIZED=0 \
+  oryd/hydra-login-consent-node:latest
+
+# check the logs, to ensure consent is running
+docker logs $HYDRA_CONSENT
+
+curl -k https://localhost:9001/health/ready
+curl -k -H 'Accept: application/json' https://localhost:9000/.well-known/jwks.json | python -m json.tool
+curl -k -H 'Accept: application/json' https://localhost:9000/.well-known/openid-configuration | python -m json.tool
+
+# help
+docker run -it --rm \
+  --network $HYDRA_NETWORK \
+  oryd/hydra:latest \
+  help token
+
+# check client credentials grant
+docker run -it --rm \
+  --network $HYDRA_NETWORK \
+  oryd/hydra:latest \
+  token client \
+  --skip-tls-verify \
+  --endpoint https://$HYDRA_INSTANCE:4444 \
+  --client-id $HYDRA_CLIENT_ID \
+  --client-secret $HYDRA_CLIENT_SECRET
+
+# check client credentials grant using curl
+curl -k -X POST \
+  -H 'Content-Type: application/x-www-form-urlencoded' \
+  -H 'Accept: application/json' \
+  -d grant_type=client_credentials \
+  -d client_id=$HYDRA_CLIENT_ID \
+  -d client_secret=$HYDRA_CLIENT_SECRET \
+  -d scope=openid \
+  -d response_type=token \
+  https://localhost:9000/oauth2/token
+
+# In browser, visit
+https://localhost:9000/oauth2/auth?client_id={INSERT-CLIENT-ID-HERE}&response_type=code&scope=openid&state=ffffffff
