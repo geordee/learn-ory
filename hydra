@@ -85,21 +85,17 @@ docker run -it --rm \
   --endpoint https://$HYDRA_INSTANCE:4445 \
   list
 
-# run a consent app
+# run a auth app
 docker run -d \
   --network $HYDRA_NETWORK \
-  --name $HYDRA_CONSENT \
-  -p 9020:3000 \
+  --name $HYDRA_AUTH \
+  -p $HYDRA_AUTH_PORT:3000 \
   -e HYDRA_ADMIN_URL=https://$HYDRA_INSTANCE:4445 \
   -e NODE_TLS_REJECT_UNAUTHORIZED=0 \
   oryd/hydra-login-consent-node:latest
 
-# check the logs, to ensure consent is running
-docker logs $HYDRA_CONSENT
-
-curl -k https://localhost:9001/health/ready
-curl -k -H 'Accept: application/json' https://localhost:9000/.well-known/jwks.json | python -m json.tool
-curl -k -H 'Accept: application/json' https://localhost:9000/.well-known/openid-configuration | python -m json.tool
+# check the logs, to ensure auth app is running
+docker logs $HYDRA_AUTH
 
 # help
 docker run -it --rm \
@@ -117,6 +113,12 @@ docker run -it --rm \
   --client-id $HYDRA_CLIENT_ID \
   --client-secret $HYDRA_CLIENT_SECRET
 
+# health & configuration
+source .env
+curl -k https://localhost:$HYDRA_ADMIN_PORT/health/ready
+curl -k -H 'Accept: application/json' https://localhost:$HYDRA_ISSUER_PORT/.well-known/jwks.json | python -m json.tool
+curl -k -H 'Accept: application/json' https://localhost:$HYDRA_ISSUER_PORT/.well-known/openid-configuration | python -m json.tool
+
 # check client credentials grant using curl
 curl -k -X POST \
   -H 'Content-Type: application/x-www-form-urlencoded' \
@@ -126,7 +128,7 @@ curl -k -X POST \
   -d client_secret=$HYDRA_CLIENT_SECRET \
   -d scope=openid \
   -d response_type=token \
-  https://localhost:9000/oauth2/token
+  https://localhost:$HYDRA_ISSUER_PORT/oauth2/token
 
 # In browser, visit
-https://localhost:9000/oauth2/auth?client_id={INSERT-CLIENT-ID-HERE}&response_type=code&scope=openid&state=ffffffff
+echo "https://localhost:${HYDRA_ISSUER_PORT}/oauth2/auth?client_id=${HYDRA_CLIENT_ID}&response_type=code&scope=openid&state=ffffffff"
